@@ -11,6 +11,31 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY not found in environment variables")
 
+# Strip quotes, whitespace, and newlines from API key (common mistakes in .env files)
+OPENAI_API_KEY = OPENAI_API_KEY.strip().strip('"').strip("'").strip()
+# Remove any trailing newlines or carriage returns that might have been included
+OPENAI_API_KEY = OPENAI_API_KEY.rstrip('\n\r')
+
+# Validate API key format
+if not OPENAI_API_KEY.startswith("sk-"):
+    raise ValueError(
+        f"Invalid API key format. API key should start with 'sk-'. "
+        f"Found: {OPENAI_API_KEY[:10]}... (first 10 chars). "
+        f"Please check your .env file - make sure there are no quotes around the key."
+    )
+
+# Additional validation: check for common issues
+if len(OPENAI_API_KEY) < 40:
+    raise ValueError(
+        f"API key seems too short ({len(OPENAI_API_KEY)} chars). "
+        f"Please verify your API key is complete."
+    )
+if '\n' in OPENAI_API_KEY or '\r' in OPENAI_API_KEY:
+    raise ValueError(
+        "API key contains newline characters. "
+        "Please check your .env file and ensure the key is on a single line."
+    )
+
 # Model Configuration
 DEFAULT_MODEL = "gpt-4o-mini"  # Can be changed to gpt-4, gpt-3.5-turbo, etc.
 DEFAULT_TEMPERATURE = 0.7

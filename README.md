@@ -16,6 +16,7 @@ A multi-agent LLM conversation system that explores how misinformation spreads o
 - `conversation/` - Core conversation system
 - `evaluation/` - Parameter sweeps and evaluation metrics
 - `visualization/` - Visualization tools for stance shifts and accuracy
+- `tests/` - Unit tests for core functionality
 - `logs/` - Conversation logs and results
 - `config.py` - Configuration settings
 - `main.py` - Main entry point
@@ -59,4 +60,22 @@ python main.py       # Full system with menu
 - Parameter sweeps: context size, correctness, query complexity, turns, agents
 - Visualization of stance shifts and accuracy metrics
 - Comprehensive logging and tracking
+- Unit test suite for core functionality
+
+## Testing
+
+Run the test suite:
+
+```bash
+# Run all tests
+pytest
+
+# Run with coverage
+pytest --cov=. --cov-report=html
+
+# Run specific test file
+pytest tests/test_dataset.py
+```
+
+See [tests/README.md](tests/README.md) for more information about the test suite.
 

@@ -152,6 +152,7 @@ class Visualizer:
         """
         Plot convergence analysis across different parameters.
         Creates separate heatmaps for each parameter type to avoid mixing issues.
+        Also includes a claim_type analysis aggregating across all parameter sweeps.
         
         Args:
             sweep_results: List of results from parameter sweep
@@ -159,15 +160,28 @@ class Visualizer:
         """
         # Extract convergence data
         convergence_data = []
+        claim_type_data = []  # Separate data for claim_type analysis
         
         for result in sweep_results:
             eval_result = result["evaluation"]
+            claim_type = result.get("claim_type", "unknown")
+            
+            # Add to main convergence data
             convergence_data.append({
                 "parameter": result["parameter"],
                 "parameter_value": str(result["parameter_value"]),
                 "converged": eval_result.get("converged", False),
                 "correctness": eval_result.get("overall_correctness", "unknown")
             })
+            
+            # Also collect claim_type data from all results (not just claim_type parameter sweep)
+            if claim_type != "unknown":
+                claim_type_data.append({
+                    "parameter": "claim_type",
+                    "parameter_value": claim_type,
+                    "converged": eval_result.get("converged", False),
+                    "correctness": eval_result.get("overall_correctness", "unknown")
+                })
         
         if not convergence_data:
             print("No convergence data found")
@@ -175,8 +189,17 @@ class Visualizer:
         
         df = pd.DataFrame(convergence_data)
         
-        # Get unique parameters
-        unique_params = df["parameter"].unique()
+        # Get unique parameters (excluding claim_type if it exists, we'll add it separately)
+        unique_params = [p for p in df["parameter"].unique() if p != "claim_type"]
+        
+        # Add claim_type analysis if we have data
+        if claim_type_data:
+            claim_type_df = pd.DataFrame(claim_type_data)
+            # Only add if we have multiple claim types
+            if len(claim_type_df["parameter_value"].unique()) > 1:
+                unique_params.append("claim_type")
+                # Add claim_type data to main dataframe
+                df = pd.concat([df, claim_type_df], ignore_index=True)
         
         # Create separate heatmaps for each parameter
         n_params = len(unique_params)
@@ -212,7 +235,14 @@ class Visualizer:
                 pivot.columns = pivot.columns.astype(str)
             except (ValueError, TypeError):
                 # If not numeric, sort alphabetically
-                pivot = pivot.sort_index(axis=1)
+                # For claim_type, use a specific order: ground_truth, false, debatable
+                if param == "claim_type":
+                    desired_order = ["ground_truth", "false", "debatable"]
+                    existing_cols = [c for c in desired_order if c in pivot.columns]
+                    if existing_cols:
+                        pivot = pivot[existing_cols]
+                else:
+                    pivot = pivot.sort_index(axis=1)
             
             ax = axes[idx] if n_params > 1 else axes[0]
             sns.heatmap(pivot, annot=True, fmt=".2f", cmap="RdYlGn", 
@@ -679,9 +709,15 @@ class Visualizer:
             config_text += f"  Value: {info['value']}\n"
             config_text += f"  Error Rate: {info.get('error_rate', 0):.1%}\n"
             config_text += f"  Hallucination Rate: {info.get('hallucination_rate', 0):.1%}\n"
+            if 'non_convergence_rate' in info:
+                config_text += f"  Non-Convergence Rate: {info.get('non_convergence_rate', 0):.1%}\n"
             config_text += f"  Correct Rate: {info.get('correct_rate', 0):.1%}\n"
+            if 'sample_size' in info:
+                config_text += f"  Sample Size: {info.get('sample_size', 0)} tests\n"
             if 'combined_score' in info:
-                config_text += f"  Combined Score: {info['combined_score']:.2f}\n"
+                # Show normalized score with context
+                score = info['combined_score']
+                config_text += f"  Combined Score: {score:.3f} (0.0=best, 1.0=worst)\n"
             config_text += "\n"
         
         ax2.text(0.1, 0.95, config_text, transform=ax2.transAxes, 

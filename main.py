@@ -32,7 +32,8 @@ def run_single_conversation(claim: Claim, personalities: list = None):
         claim=result["claim"],
         claim_type=result["claim_type"],
         final_responses=result["final_responses"],
-        conversation_history=result["conversation_history"]
+        conversation_history=result["conversation_history"],
+        verify_accuracy=True  # Enable accuracy verification
     )
     
     # Calculate advanced metrics
@@ -41,6 +42,23 @@ def run_single_conversation(claim: Claim, personalities: list = None):
     print(f"\nOverall Correctness: {evaluation.get('overall_correctness', 'unknown')}")
     print(f"Converged: {evaluation.get('converged', False)}")
     print(f"Hallucinations Detected: {evaluation.get('hallucinations_detected', False)}")
+    
+    # Display accuracy verification results
+    if "accuracy_verification" in evaluation:
+        acc_ver = evaluation["accuracy_verification"]
+        print(f"\n--- Judge Accuracy Verification ---")
+        print(f"Overall Accuracy Score: {acc_ver.get('overall_accuracy', 0.0):.3f}")
+        print(f"Accuracy Flag: {'✓ PASS' if acc_ver.get('accuracy_flag', False) else '✗ FAIL'}")
+        print(f"Per-Agent Similarities:")
+        threshold = acc_ver.get('similarity_threshold', 0.7)
+        for agent, sim in acc_ver.get('per_agent_similarities', {}).items():
+            status = "✓" if sim >= threshold else "✗"
+            print(f"  {status} {agent}: {sim:.3f}")
+        if acc_ver.get('warnings'):
+            print(f"Warnings:")
+            for warning in acc_ver['warnings']:
+                print(f"  ⚠ {warning}")
+    
     print(f"\n--- Advanced Metrics ---")
     print(f"Final Agreement Score: {advanced_metrics.get('final_agreement_score', 0.0):.2f}")
     print(f"Average Agreement: {advanced_metrics.get('average_agreement', 0.0):.2f}")
@@ -126,18 +144,39 @@ def run_parameter_sweeps():
     context_results_all = []
     # Use consistent personality combination with deceiver for all parameter sweeps
     personalities = ["skeptic", "optimist", "persuader", "deceiver"]
-    for claim_type, claim in sample_claims.items():
+    
+    # Test each context size with 3 claims of each type for better statistics
+    print("Testing each context size with 3 claims of each type (9 total tests per context size)...")
+    context_test_claims = {
+        ClaimType.GROUND_TRUTH: get_claims_by_type(ClaimType.GROUND_TRUTH)[:3],
+        ClaimType.FALSE: get_claims_by_type(ClaimType.FALSE)[:3],
+        ClaimType.DEBATABLE: get_claims_by_type(ClaimType.DEBATABLE)[:3]
+    }
+    
+    # Combine all test claims
+    all_context_test_claims = []
+    for claim_type, claims in context_test_claims.items():
+        all_context_test_claims.extend(claims)
+        print(f"  - {claim_type.value}: {len(claims)} claims")
+    
+    print(f"Total: {len(all_context_test_claims)} claims × {len(context_sizes)} context sizes = {len(all_context_test_claims) * len(context_sizes)} tests")
+    
+    # Run sweep for each claim and combine results
+    for claim in all_context_test_claims:
+        print(f"\nTesting all context sizes with claim: '{claim.text[:60]}...' ({claim.claim_type.value})")
         results = sweep.sweep_context_size(
             context_sizes=context_sizes,
             claim=claim,
             personalities=personalities
         )
         context_results_all.extend(results)
-        visualizer.plot_accuracy_vs_parameter(
-            results, 
-            "context_size",
-            save_path=f"visualizations/accuracy_vs_context_size_{claim_type.value}.png"
-        )
+    
+    # Generate visualizations for combined results
+    visualizer.plot_accuracy_vs_parameter(
+        context_results_all, 
+        "context_size",
+        save_path="visualizations/accuracy_vs_context_size_all.png"
+    )
     visualizer.plot_average_stance_shifts(
         context_results_all,
         "context_size",
@@ -150,18 +189,39 @@ def run_parameter_sweeps():
     max_turn_results_all = []
     # Use consistent personality combination with deceiver for all parameter sweeps
     personalities = ["skeptic", "optimist", "persuader", "deceiver"]
-    for claim_type, claim in sample_claims.items():
+    
+    # Test each max_turns value with 3 claims of each type for better statistics
+    print("Testing each max_turns value with 3 claims of each type (9 total tests per max_turns value)...")
+    max_turns_test_claims = {
+        ClaimType.GROUND_TRUTH: get_claims_by_type(ClaimType.GROUND_TRUTH)[:3],
+        ClaimType.FALSE: get_claims_by_type(ClaimType.FALSE)[:3],
+        ClaimType.DEBATABLE: get_claims_by_type(ClaimType.DEBATABLE)[:3]
+    }
+    
+    # Combine all test claims
+    all_max_turns_test_claims = []
+    for claim_type, claims in max_turns_test_claims.items():
+        all_max_turns_test_claims.extend(claims)
+        print(f"  - {claim_type.value}: {len(claims)} claims")
+    
+    print(f"Total: {len(all_max_turns_test_claims)} claims × {len(max_turns_list)} max_turns values = {len(all_max_turns_test_claims) * len(max_turns_list)} tests")
+    
+    # Run sweep for each claim and combine results
+    for claim in all_max_turns_test_claims:
+        print(f"\nTesting all max_turns values with claim: '{claim.text[:60]}...' ({claim.claim_type.value})")
         results = sweep.sweep_max_turns(
             max_turns_list=max_turns_list,
             claim=claim,
             personalities=personalities
         )
         max_turn_results_all.extend(results)
-        visualizer.plot_accuracy_vs_parameter(
-            results,
-            "max_turns",
-            save_path=f"visualizations/accuracy_vs_max_turns_{claim_type.value}.png"
-        )
+    
+    # Generate visualizations for combined results
+    visualizer.plot_accuracy_vs_parameter(
+        max_turn_results_all,
+        "max_turns",
+        save_path="visualizations/accuracy_vs_max_turns_all.png"
+    )
     visualizer.plot_average_stance_shifts(
         max_turn_results_all,
         "max_turns",
@@ -190,11 +250,32 @@ def run_parameter_sweeps():
         # All four agents
         ["skeptic", "optimist", "persuader", "deceiver"]
     ]
-    claim = sample_claims[ClaimType.DEBATABLE]  # Use debatable for personality test
-    results = sweep.sweep_personality_combinations(
-        personality_combinations=personality_combinations,
-        claim=claim
-    )
+    
+    # Test each personality combination with 3 claims of each type for better statistics
+    print("Testing each personality combination with 3 claims of each type (9 total tests per combination)...")
+    test_claims = {
+        ClaimType.GROUND_TRUTH: get_claims_by_type(ClaimType.GROUND_TRUTH)[:3],
+        ClaimType.FALSE: get_claims_by_type(ClaimType.FALSE)[:3],
+        ClaimType.DEBATABLE: get_claims_by_type(ClaimType.DEBATABLE)[:3]
+    }
+    
+    # Combine all test claims
+    all_test_claims = []
+    for claim_type, claims in test_claims.items():
+        all_test_claims.extend(claims)
+        print(f"  - {claim_type.value}: {len(claims)} claims")
+    
+    print(f"Total: {len(all_test_claims)} claims × {len(personality_combinations)} combinations = {len(all_test_claims) * len(personality_combinations)} tests")
+    
+    # Run sweep for each claim and combine results
+    results = []
+    for claim in all_test_claims:
+        print(f"\nTesting all combinations with claim: '{claim.text[:60]}...' ({claim.claim_type.value})")
+        claim_results = sweep.sweep_personality_combinations(
+            personality_combinations=personality_combinations,
+            claim=claim
+        )
+        results.extend(claim_results)
     visualizer.plot_accuracy_vs_parameter(
         results,
         "personality_combinations",
@@ -339,9 +420,12 @@ def run_parameter_sweeps():
         print(f"{param_name}: {info['value']}")
         print(f"  Error Rate: {info.get('error_rate', 0):.2%}")
         print(f"  Hallucination Rate: {info.get('hallucination_rate', 0):.2%}")
+        print(f"  Non-Convergence Rate: {info.get('non_convergence_rate', 0):.2%}")
+        print(f"  Convergence Rate: {info.get('convergence_rate', 0):.2%}")
         print(f"  Correct Rate: {info.get('correct_rate', 0):.2%}")
+        print(f"  Sample Size: {info.get('sample_size', 0)} tests")
         if 'combined_score' in info:
-            print(f"  Combined Score: {info['combined_score']:.2f}")
+            print(f"  Combined Score (normalized): {info['combined_score']:.3f} (0.0 = best, 1.0 = worst)")
     
     # Display worst configuration
     print("\n" + "="*60)

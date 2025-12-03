@@ -5,6 +5,7 @@ from openai import OpenAI
 import config
 from typing import Dict, List
 from enum import Enum
+import numpy as np
 
 class CorrectnessLevel(Enum):
     CORRECT = "correct"
@@ -23,10 +24,179 @@ class JudgeAgent:
         self.model = model or config.JUDGE_MODEL
         self.temperature = temperature or config.JUDGE_TEMPERATURE
         self.client = OpenAI(api_key=config.OPENAI_API_KEY)
+        self.client = OpenAI(api_key=config.OPENAI_API_KEY)
+    
+    def _get_embeddings(self, texts: List[str]) -> np.ndarray:
+        """
+        Get embeddings for a list of texts using OpenAI's embedding model.
+        
+        Args:
+            texts: List of text strings to embed
+            
+        Returns:
+            numpy array of embeddings (n_texts, embedding_dim)
+        """
+        try:
+            response = self.client.embeddings.create(
+                model="text-embedding-3-small",  # or "text-embedding-ada-002"
+                input=texts
+            )
+            embeddings = [item.embedding for item in response.data]
+            return np.array(embeddings)
+        except Exception as e:
+            raise Exception(f"Failed to get embeddings: {str(e)}")
+    
+    def _cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
+        """
+        Calculate cosine similarity between two vectors.
+        
+        Args:
+            vec1: First vector
+            vec2: Second vector
+            
+        Returns:
+            Cosine similarity score between -1 and 1
+        """
+        dot_product = np.dot(vec1, vec2)
+        norm1 = np.linalg.norm(vec1)
+        norm2 = np.linalg.norm(vec2)
+        
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+        
+        return dot_product / (norm1 * norm2)
+    
+    def verify_judge_accuracy(self, final_responses: Dict[str, str], 
+                              evaluation: Dict, 
+                              similarity_threshold: float = 0.7) -> Dict:
+        """
+        Verify that the judge's evaluation accurately reflects the actual agent responses
+        using cosine similarity of embeddings.
+        
+        Args:
+            final_responses: Dictionary mapping agent names to their actual final responses
+            evaluation: The judge's evaluation dictionary
+            similarity_threshold: Minimum similarity score to consider accurate (default: 0.7)
+            
+        Returns:
+            Dictionary with verification results including:
+            - overall_accuracy: Average similarity score
+            - per_agent_similarities: Similarity scores for each agent
+            - accuracy_flag: Boolean indicating if all similarities meet threshold
+            - warnings: List of agents with low similarity scores
+        """
+        if not final_responses:
+            return {
+                "overall_accuracy": 0.0,
+                "per_agent_similarities": {},
+                "accuracy_flag": False,
+                "warnings": ["No agent responses provided"],
+                "error": "No responses to verify"
+            }
+        
+        # Combine all actual agent responses into a single text
+        actual_responses_text = "\n\n".join([
+            f"{agent}: {response}" 
+            for agent, response in final_responses.items()
+        ])
+        
+        # Get the judge's reasoning/evaluation text
+        judge_text = evaluation.get("reasoning", "") + " " + evaluation.get("raw_evaluation", "")
+        
+        # If judge_text is empty, try to reconstruct from agent_evaluations
+        if not judge_text.strip():
+            agent_evals = evaluation.get("agent_evaluations", {})
+            judge_text = " ".join([
+                f"{agent}: {eval_result}" 
+                for agent, eval_result in agent_evals.items()
+            ])
+        
+        try:
+            # Get embeddings for actual responses and judge's evaluation
+            actual_embedding = self._get_embeddings([actual_responses_text])[0]
+            judge_embedding = self._get_embeddings([judge_text])[0]
+            
+            # Calculate overall similarity
+            overall_similarity = self._cosine_similarity(actual_embedding, judge_embedding)
+            
+            # Use more lenient thresholds since we're comparing evaluation text to response text
+            # These are semantically different types, so perfect similarity isn't expected
+            agent_threshold = similarity_threshold * 0.65  # 0.455 for default 0.7 threshold
+            overall_threshold = similarity_threshold * 0.6  # 0.42 for default 0.7 threshold
+            
+            # Calculate per-agent similarities
+            per_agent_similarities = {}
+            warnings = []
+            
+            for agent, actual_response in final_responses.items():
+                # Get embedding for this agent's actual response
+                agent_actual_embedding = self._get_embeddings([actual_response])[0]
+                
+                # Extract what the judge said about this agent from the evaluation
+                agent_eval = evaluation.get("agent_evaluations", {}).get(agent, "")
+                agent_reasoning = ""
+                
+                # Improved extraction: get sentences mentioning this agent with more context
+                if agent in judge_text:
+                    # Split by sentences, but also look for agent mentions with more context
+                    sentences = judge_text.replace('!', '.').replace('?', '.').split('.')
+                    agent_sentences = []
+                    for i, sentence in enumerate(sentences):
+                        if agent.lower() in sentence.lower():
+                            # Include surrounding context (previous and next sentence if available)
+                            context_start = max(0, i - 1)
+                            context_end = min(len(sentences), i + 2)
+                            context = ". ".join(sentences[context_start:context_end])
+                            agent_sentences.append(context)
+                    
+                    agent_reasoning = ". ".join(agent_sentences)
+                
+                # Combine agent evaluation and reasoning
+                # Also include the actual response in the comparison to help with semantic matching
+                judge_agent_text = f"{agent_eval}. {agent_reasoning}".strip()
+                
+                if judge_agent_text:
+                    judge_agent_embedding = self._get_embeddings([judge_agent_text])[0]
+                    similarity = self._cosine_similarity(agent_actual_embedding, judge_agent_embedding)
+                else:
+                    # If no judge text for this agent, use overall similarity
+                    similarity = overall_similarity
+                
+                per_agent_similarities[agent] = similarity
+                
+                # Use the lenient threshold defined above
+                if similarity < agent_threshold:
+                    warnings.append(
+                        f"Low similarity ({similarity:.2f}) for {agent}: "
+                        f"judge's evaluation may not accurately reflect agent's response"
+                    )
+            
+            accuracy_flag = all(
+                sim >= agent_threshold 
+                for sim in per_agent_similarities.values()
+            ) and overall_similarity >= overall_threshold
+            
+            return {
+                "overall_accuracy": float(overall_similarity),
+                "per_agent_similarities": {k: float(v) for k, v in per_agent_similarities.items()},
+                "accuracy_flag": accuracy_flag,
+                "warnings": warnings,
+                "similarity_threshold": similarity_threshold
+            }
+            
+        except Exception as e:
+            return {
+                "overall_accuracy": 0.0,
+                "per_agent_similarities": {},
+                "accuracy_flag": False,
+                "warnings": [f"Verification failed: {str(e)}"],
+                "error": str(e)
+            }
     
     def evaluate_conversation(self, claim: str, claim_type: str, 
                             final_responses: Dict[str, str],
-                            conversation_history: List[Dict]) -> Dict:
+                            conversation_history: List[Dict],
+                            verify_accuracy: bool = True) -> Dict:
         """
         Evaluate a conversation and classify correctness.
         
@@ -35,9 +205,10 @@ class JudgeAgent:
             claim_type: Type of claim (ground_truth, false, debatable)
             final_responses: Final responses from each agent
             conversation_history: Full conversation history
+            verify_accuracy: If True, verify judge accuracy using cosine similarity
         
         Returns:
-            Dictionary with evaluation results
+            Dictionary with evaluation results, including accuracy verification if enabled
         """
         # Build evaluation prompt
         responses_text = "\n\n".join([
@@ -68,6 +239,8 @@ Your task:
 3. Determine if the group converged to the correct answer or drifted into misinformation
 4. Identify any hallucinations or false information introduced
 
+IMPORTANT: In your reasoning, for each agent, briefly summarize what they actually said in their final response. This helps verify that your evaluation accurately reflects their actual words.
+
 Respond with a JSON object in the following format:
 {{
     "overall_correctness": "correct|approximate|wrong",
@@ -76,10 +249,12 @@ Respond with a JSON object in the following format:
     }},
     "converged": true|false,
     "hallucinations_detected": true|false,
-    "reasoning": "brief explanation"
+    "reasoning": "Detailed explanation that includes a brief summary of what each agent actually said in their final response. For example: 'The skeptic said [summary of their actual response]. The optimist argued [summary].' This helps ensure your evaluation accurately reflects their actual responses."
 }}
 
-Important: For agent_evaluations, include an entry for each agent in the conversation."""
+Important: 
+- For agent_evaluations, include an entry for each agent in the conversation.
+- In your reasoning, include brief summaries of what each agent actually said to demonstrate you understood their responses."""
 
         try:
             response = self.client.chat.completions.create(
@@ -106,15 +281,33 @@ Important: For agent_evaluations, include an entry for each agent in the convers
                 evaluation.setdefault("hallucinations_detected", False)
                 evaluation.setdefault("reasoning", "")
                 evaluation["raw_evaluation"] = evaluation_text
+                
+                # Verify accuracy if requested
+                if verify_accuracy:
+                    accuracy_verification = self.verify_judge_accuracy(
+                        final_responses, 
+                        evaluation
+                    )
+                    evaluation["accuracy_verification"] = accuracy_verification
+                
                 return evaluation
             except json.JSONDecodeError:
                 # Fallback to old parsing if JSON is malformed
                 evaluation = self._parse_evaluation(evaluation_text, final_responses)
                 evaluation["raw_evaluation"] = evaluation_text
+                
+                # Verify accuracy if requested
+                if verify_accuracy:
+                    accuracy_verification = self.verify_judge_accuracy(
+                        final_responses, 
+                        evaluation
+                    )
+                    evaluation["accuracy_verification"] = accuracy_verification
+                
                 return evaluation
             
         except Exception as e:
-            return {
+            evaluation = {
                 "overall_correctness": "unknown",
                 "agent_evaluations": {},
                 "converged": False,
@@ -122,6 +315,19 @@ Important: For agent_evaluations, include an entry for each agent in the convers
                 "error": str(e),
                 "raw_evaluation": f"Error during evaluation: {str(e)}"
             }
+            
+            # Still try to verify if we have responses
+            if verify_accuracy and final_responses:
+                try:
+                    accuracy_verification = self.verify_judge_accuracy(
+                        final_responses, 
+                        evaluation
+                    )
+                    evaluation["accuracy_verification"] = accuracy_verification
+                except:
+                    pass
+            
+            return evaluation
     
     def _parse_evaluation(self, evaluation_text: str, final_responses: Dict[str, str]) -> Dict:
         """Parse the judge's evaluation text into structured format."""

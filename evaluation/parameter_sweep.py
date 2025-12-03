@@ -10,6 +10,7 @@ from results.debate_storage import save_debate_summary
 from visualization.visualizer import Visualizer
 import json
 import os
+import math
 from datetime import datetime
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -585,19 +586,43 @@ class ParameterSweep:
         print(f"Results saved to {filepath}")
         return filepath
     
-    def get_worst_parameters(self) -> Dict[str, Any]:
-        """Analyze results to find worst parameter values (most likely to cause hallucinations)."""
+    def get_worst_parameters(self, 
+                            error_weight: float = 0.4,
+                            hallucination_weight: float = 0.4,
+                            convergence_weight: float = 0.2,
+                            min_samples: int = 3) -> Dict[str, Any]:
+        """
+        Analyze results to find worst parameter values (most likely to cause hallucinations).
+        
+        Args:
+            error_weight: Weight for error rate (default: 0.4)
+            hallucination_weight: Weight for hallucination rate (default: 0.4)
+            convergence_weight: Weight for non-convergence rate (default: 0.2)
+            min_samples: Minimum number of samples required for reliable scoring (default: 3)
+        
+        Returns:
+            Dictionary with worst parameter values and their scores
+        """
         if not self.results:
             return {}
         
-        # Simple analysis: find parameters with lowest correctness rates / highest hallucination rates
+        # Normalize weights to sum to 1.0
+        total_weight = error_weight + hallucination_weight + convergence_weight
+        if total_weight > 0:
+            error_weight /= total_weight
+            hallucination_weight /= total_weight
+            convergence_weight /= total_weight
+        
+        # Aggregate results by parameter value
         parameter_scores = {}
         
         for result in self.results:
             param = result["parameter"]
             param_value = result["parameter_value"]
-            correctness = result["evaluation"].get("overall_correctness", "unknown")
-            hallucinations = result["evaluation"].get("hallucinations_detected", False)
+            evaluation = result.get("evaluation", {})
+            correctness = evaluation.get("overall_correctness", "unknown")
+            hallucinations = evaluation.get("hallucinations_detected", False)
+            converged = evaluation.get("converged", False)
             
             if param not in parameter_scores:
                 parameter_scores[param] = {}
@@ -605,7 +630,7 @@ class ParameterSweep:
             if param_value not in parameter_scores[param]:
                 parameter_scores[param][param_value] = {
                     "correct": 0, "approximate": 0, "wrong": 0, 
-                    "hallucinations": 0, "total": 0
+                    "hallucinations": 0, "non_converged": 0, "total": 0
                 }
             
             parameter_scores[param][param_value]["total"] += 1
@@ -613,35 +638,61 @@ class ParameterSweep:
                 parameter_scores[param][param_value][correctness] += 1
             if hallucinations:
                 parameter_scores[param][param_value]["hallucinations"] += 1
+            if not converged:
+                parameter_scores[param][param_value]["non_converged"] += 1
         
-        # Find worst values (lowest correct rate, highest hallucination rate)
+        # Find worst values with improved scoring
         worst_params = {}
         for param, values in parameter_scores.items():
             worst_value = None
             worst_score = -1  # Start low, we want maximum (worst)
             
             for value, scores in values.items():
+                # Skip if insufficient samples
+                if scores["total"] < min_samples:
+                    continue
+                
+                # Calculate error rate (0.0 to 1.0)
                 # Weight: wrong = 1.0, approximate = 0.5, correct = 0.0
-                # Add hallucination rate (hallucinations/total)
                 error_score = (
                     scores["wrong"] * 1.0 + 
                     scores["approximate"] * 0.5
                 ) / scores["total"] if scores["total"] > 0 else 0
+                
+                # Calculate hallucination rate (0.0 to 1.0)
                 hallucination_rate = scores["hallucinations"] / scores["total"] if scores["total"] > 0 else 0
-                # Combined worst score: error rate + hallucination rate
-                combined_score = error_score + hallucination_rate
-                if combined_score > worst_score:
-                    worst_score = combined_score
+                
+                # Calculate non-convergence rate (0.0 to 1.0)
+                non_convergence_rate = scores["non_converged"] / scores["total"] if scores["total"] > 0 else 0
+                
+                # Calculate weighted combined score (normalized to 0.0-1.0)
+                combined_score = (
+                    error_score * error_weight +
+                    hallucination_rate * hallucination_weight +
+                    non_convergence_rate * convergence_weight
+                )
+                
+                # Apply sample size adjustment (more samples = more confidence)
+                # Use a logarithmic adjustment to avoid over-penalizing small samples
+                sample_size_factor = min(1.0, math.log(scores["total"] + 1) / math.log(min_samples + 1))
+                adjusted_score = combined_score * sample_size_factor
+                
+                if adjusted_score > worst_score:
+                    worst_score = adjusted_score
                     worst_value = value
             
             if worst_value:
+                scores = parameter_scores[param][worst_value]
                 worst_params[param] = {
                     "value": worst_value,
-                    "correct_rate": parameter_scores[param][worst_value]["correct"] / parameter_scores[param][worst_value]["total"] if parameter_scores[param][worst_value]["total"] > 0 else 0,
-                    "error_rate": (parameter_scores[param][worst_value]["wrong"] + parameter_scores[param][worst_value]["approximate"] * 0.5) / parameter_scores[param][worst_value]["total"] if parameter_scores[param][worst_value]["total"] > 0 else 0,
-                    "hallucination_rate": parameter_scores[param][worst_value]["hallucinations"] / parameter_scores[param][worst_value]["total"] if parameter_scores[param][worst_value]["total"] > 0 else 0,
+                    "correct_rate": scores["correct"] / scores["total"] if scores["total"] > 0 else 0,
+                    "error_rate": (scores["wrong"] + scores["approximate"] * 0.5) / scores["total"] if scores["total"] > 0 else 0,
+                    "hallucination_rate": scores["hallucinations"] / scores["total"] if scores["total"] > 0 else 0,
+                    "non_convergence_rate": scores["non_converged"] / scores["total"] if scores["total"] > 0 else 0,
+                    "convergence_rate": 1.0 - (scores["non_converged"] / scores["total"] if scores["total"] > 0 else 0),
                     "combined_score": worst_score,
-                    "scores": parameter_scores[param][worst_value] if worst_value else {}
+                    "sample_size": scores["total"],
+                    "scores": scores
                 }
         
         return worst_params
